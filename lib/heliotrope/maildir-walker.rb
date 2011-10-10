@@ -1,5 +1,3 @@
-# encoding: UTF-8
-
 require 'time'
 
 module Heliotrope
@@ -8,6 +6,7 @@ class MaildirWalker
     @dirs = dirs
   end
 
+  def can_provide_labels?; false end
   def load!; @files = get_files end
 
   def next_message
@@ -44,12 +43,14 @@ private
   end
 
   def get_date_in_file fn
-    File.open(fn) do |f|
+    File.open(fn, "r:BINARY") do |f|
       while(l = f.gets)
         if l =~ /^Date:\s+(.+\S)\s*$/
-          date = $1
-          pdate = Time.parse($1)
-          return pdate
+          return begin
+            Time.parse($1)
+          rescue
+            Time.at 0
+          end
         end
       end
     end

@@ -17,10 +17,9 @@ class Message
     @m = RMail::Parser.read @rawbody
 
     @msgid = find_msgids(decode_header(validate_field(:message_id, @m.header["message-id"]))).first
-    @safe_msgid = munge_msgid @msgid
-
     ## this next error happens if we have a field, but we can't find a <something> in it
     raise InvalidMessageError, "can't parse msgid: #{@m.header['message-id']}" unless @msgid
+    @safe_msgid = munge_msgid @msgid
 
     @from = Person.from_string decode_header(validate_field(:from, @m.header["from"]))
     @date = begin
@@ -173,9 +172,13 @@ private
     if part.multipart?
       if mime_type_for(part) =~ /multipart\/alternative/
         target = part.body.find { |p| mime_type_for(p).index(preferred_type) } || part.body.first
-        decode_mime_parts target, preferred_type, level + 1
+        if target # this can be nil
+          decode_mime_parts target, preferred_type, level + 1
+        else
+          []
+        end
       else # decode 'em all
-        part.body.map { |subpart| decode_mime_parts subpart, preferred_type, level + 1 }.flatten 1
+        part.body.compact.map { |subpart| decode_mime_parts subpart, preferred_type, level + 1 }.flatten 1
       end
     else
       type = mime_type_for part
@@ -196,7 +199,7 @@ private
   end
 
   def mime_type_for part
-    (part.header["content-type"] || "text/plain").gsub(/\s+/, " ").strip
+    (part.header["content-type"] || "text/plain").gsub(/\s+/, " ").strip.downcase
   end
 
   def mime_id_for part
@@ -252,27 +255,31 @@ private
     source_charset = if mt =~ /charset="?(.*?)"?(;|$)/i then $1 else "US-ASCII" end
 
     content = mime_part.decode
-    converted_content = if(converter = CONVERSIONS[[content_type, preferred_type]])
-      send converter, content
+    converted_content, converted_charset = if(converter = CONVERSIONS[[content_type, preferred_type]])
+      send converter, content, source_charset
     else
-      content
+      [content, source_charset]
     end
 
     if content_type =~ /^text\//
-      Decoder.transcode "utf-8", source_charset, converted_content
+      Decoder.transcode "utf-8", converted_charset, converted_content
     else
       converted_content
     end
   end
 
-  CMD = "html2text"
-  def html_to_text html
-    puts "; forced to decode html. running #{CMD} on #{html.size}b mime part..."
-    Open3.popen3(CMD) do |inn, out, err|
+  require 'locale'
+  SYSTEM_CHARSET = Locale.current.charset
+  HTML_CONVERSION_CMD = "html2text"
+  def html_to_text html, charset
+    ## ignore charset. html2text produces output in the system charset.
+    #puts "; forced to decode html. running #{HTML_CONVERSION_CMD} on #{html.size}b mime part..."
+    content = Open3.popen3(HTML_CONVERSION_CMD) do |inn, out, err|
       inn.print html
       inn.close
       out.read
     end
+    [content, SYSTEM_CHARSET]
   end
 end
 end

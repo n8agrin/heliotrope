@@ -3,7 +3,6 @@
 require 'whistlepig'
 require 'leveldb'
 require 'set'
-require 'fileutils'
 
 class Array
   def ordered_uniq
@@ -24,7 +23,7 @@ class Array
 end
 
 module Heliotrope
-class Index
+class MetaIndex
   ## these are things that can be set on a per-message basis. each one
   ## corresponds to a particular label, but labels are propagated at the
   ## thread level whereas state is not.
@@ -37,13 +36,9 @@ class Index
 
   SNIPPET_MAX_SIZE = 100 # chars
 
-  def initialize base_dir, hooks
-    FileUtils.mkdir_p base_dir
-    #@store = Rufus::Tokyo::Cabinet.new File.join(base_dir, "pstore") # broken
-    #@store = PStore.new File.join(base_dir, "pstore") # sucks
-    #@store = OklahomaMixer.open File.join(base_dir, "store.tch")
-    @store = LevelDB::DB.new File.join(base_dir, "store")
-    @index = Whistlepig::Index.new File.join(base_dir, "index")
+  def initialize store, index, hooks, opts={}
+    @store = store
+    @index = index
     @hooks = hooks
     @query = nil # we always have (at most) one active query
     @debug = false
@@ -149,6 +144,10 @@ class Index
   def update_thread_labels threadid, labels
     labels = Set.new(labels) - MESSAGE_STATE
 
+    ## add the labels to the set of all labels we've ever seen. do this
+    ## first because it also does some validation.
+    add_labels_to_labellist! labels
+
     key = "tlabels/#{threadid}"
     old_tlabels = load_set key
     new_tlabels = (old_tlabels & MESSAGE_STATE) + labels
@@ -156,9 +155,6 @@ class Index
 
     threadinfo = load_hash "thread/#{threadid}"
     write_thread_message_labels! threadinfo[:structure], new_tlabels
-
-    ## add the labels to the set of all labels we've ever seen
-    add_labels_to_labellist! labels
 
     new_tlabels
   end
@@ -216,6 +212,7 @@ class Index
     return unless contains_key? key
     h = load_hash key
     h.merge :state => load_set("state/#{docid}"),
+      :labels => load_set("mlabels/#{docid}"),
       :thread_id => load_int("threadid/#{docid}"),
       :snippet => load_string("msnip/#{docid}"),
       :message_id => docid
@@ -269,7 +266,19 @@ class Index
     write_set "labellist", pruned_labels
   end
 
+  def indexable_text_for thing
+    orig = thing.indexable_text
+    transformed = @hooks.run "transform-text", :text => orig
+    transformed = Decoder.encode_as_utf8 transformed
+    transformed || orig
+  end
+
 private
+
+  def is_valid_whistlepig_token? l
+    # copy logic from whistlepig's query-parser.lex
+    l =~ /^[^\(\)"\-~:\*][^\(\)":]*$/
+  end
 
   def really_update_message_state docid, state
     ## update message state
@@ -330,10 +339,17 @@ private
     write_set "turps/#{threadid}", unread_participants
   end
 
+  class InvalidLabelError < StandardError
+    def initialize label
+      super "#{label} is an invalid label"
+    end
+  end
+
   def add_labels_to_labellist! labels
+    labels.each { |l| raise InvalidLabelError, l unless is_valid_whistlepig_token?(l) }
     key = "labellist"
     labellist = load_set key
-    labellist_new = labellist + labels
+    labellist_new = labellist + labels.select { |l| is_valid_whistlepig_token? l }
     write_set key, labellist_new unless labellist == labellist_new
   end
 
@@ -460,7 +476,7 @@ private
   ## roots for the cases when we have seen multiple children but not the
   ## parent.
   def build_thread_structure_from safe_msgid, seen={}
-    return [] if seen[safe_msgid]
+    return nil if seen[safe_msgid]
 
     docid = load_int "docid/#{safe_msgid}"
     children = load_set "cmsgids/#{safe_msgid}"
@@ -525,21 +541,14 @@ private
     ## make the entry
     startt = Time.now
     entry = Whistlepig::Entry.new
-    entry.add_string "msgid", message.safe_msgid
-    entry.add_string "from", get_indexable_text(message.from).downcase
-    entry.add_string "to", message.recipients.map { |x| get_indexable_text x }.join(" ").downcase
+    entry.add_string "from", indexable_text_for(message.from).downcase
+    entry.add_string "to", message.recipients.map { |x| indexable_text_for x }.join(" ").downcase
     entry.add_string "subject", message.subject.downcase
     entry.add_string "date", message.date.to_s
-    entry.add_string "body", get_indexable_text(message).downcase
+    entry.add_string "body", indexable_text_for(message).downcase
     @index_time += Time.now - startt
 
     @index.add_entry entry
-  end
-
-  def get_indexable_text thing
-    orig = thing.indexable_text
-    transformed = @hooks.run "transform-text", :text => orig
-    transformed || orig
   end
 
   def write_messageinfo! message, state, docid, extra

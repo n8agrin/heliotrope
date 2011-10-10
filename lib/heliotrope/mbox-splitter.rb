@@ -1,5 +1,3 @@
-# encoding: UTF-8
-
 module Heliotrope
 
 ## a single mbox message on a stream
@@ -16,6 +14,7 @@ class MBoxStream
 
   def done?; @stream.eof? end
   def finish!; end
+  def load!; end
 end
 
 ## a custom mbox splitter / from line detector. rmail has one, but it splits on
@@ -29,6 +28,7 @@ class MboxSplitter
     @stream.seek opts[:start_offset] if opts[:start_offset]
   end
 
+  def can_provide_labels?; false end
   def load!; end # nothing to do
 
   def next_message
